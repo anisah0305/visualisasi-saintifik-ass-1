@@ -1,4 +1,6 @@
-streamlit
+streamlit>=1.60
 pandas
-plotly
 numpy
+seaborn
+matplotlib
+bokeh>=3.8,<4
