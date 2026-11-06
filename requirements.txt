@@ -1,6 +1,5 @@
-streamlit>=1.56,<2
+streamlit>=1.60,<2
 pandas>=2.2,<3
-numpy>=1.26,<3
 matplotlib>=3.8,<4
 seaborn>=0.13,<1
-bokeh>=3.7,<4
+bokeh>=3.8,<4
