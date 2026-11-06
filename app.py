@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 import streamlit as st
-
 from bokeh.embed import file_html
 from bokeh.models import ColumnDataSource, HoverTool, Span
 from bokeh.plotting import figure
@@ -13,7 +12,7 @@ from matplotlib.ticker import StrMethodFormatter
 
 
 # ==========================================
-# 1. DASHBOARD DESIGN
+# 1. PAGE SETTINGS AND DASHBOARD DESIGN
 # ==========================================
 
 st.set_page_config(
@@ -31,10 +30,9 @@ sns.set_theme(style="whitegrid")
 st.markdown("""
 <style>
 .block-container {
-    max-width: 1180px;
-    padding-top: 1.4rem;
+    max-width: 1150px;
+    padding-top: 1.3rem;
 }
-
 h1, h2, h3 {
     color: #174737;
 }
@@ -43,7 +41,7 @@ h1, h2, h3 {
 
 
 # ==========================================
-# 2. DATA LOADING AND CLEANING
+# 2. LOAD, CLEAN AND MERGE DATASETS
 # ==========================================
 
 @st.cache_data
@@ -51,99 +49,161 @@ def load_data():
 
     folder = Path(__file__).resolve().parent
 
-    birth = pd.read_csv(folder / "birth_state.csv")
-    income = pd.read_csv(folder / "hh_income_state.csv")
+    birth = pd.read_csv(
+        folder / "birth_state.csv"
+    )
+
+    income = pd.read_csv(
+        folder / "hh_income_state.csv"
+    )
+
     school = pd.read_csv(
         folder / "completion_school_state.csv"
     )
 
     # Standardize state names and dates
     for df in (birth, income, school):
-        df["state"] = df["state"].astype(str).str.strip()
+
+        df["state"] = (
+            df["state"].astype(str).str.strip()
+        )
+
         df["year"] = pd.to_datetime(
             df["date"], errors="coerce"
         ).dt.year
 
-    # Convert numerical columns
-    for col in ("abs", "rate"):
-        birth[col] = pd.to_numeric(
-            birth[col], errors="coerce"
+        df.dropna(
+            subset=["state", "year"],
+            inplace=True
         )
 
-    for col in ("income_median", "income_mean"):
-        income[col] = pd.to_numeric(
-            income[col], errors="coerce"
+        df["year"] = df["year"].astype(int)
+
+        # Exclude nationwide totals
+        df.drop(
+            df[df["state"] == "Malaysia"].index,
+            inplace=True
+        )
+
+    # Convert numerical columns
+    for field in ("rate", "abs"):
+        birth[field] = pd.to_numeric(
+            birth[field], errors="coerce"
+        )
+
+    for field in ("income_median", "income_mean"):
+        income[field] = pd.to_numeric(
+            income[field], errors="coerce"
         )
 
     school["completion"] = pd.to_numeric(
         school["completion"], errors="coerce"
     )
 
-    school["stage"] = school["stage"].str.strip()
-    school["sex"] = school["sex"].str.strip()
+    school["stage"] = (
+        school["stage"].astype(str).str.strip()
+    )
 
-    # Remove duplicate observations
-    birth = birth.dropna(
-        subset=["state", "year"]
-    ).drop_duplicates(["state", "year"])
+    school["sex"] = (
+        school["sex"].astype(str).str.strip()
+    )
 
-    income = income.dropna(
-        subset=["state", "year"]
-    ).drop_duplicates(["state", "year"])
+    # Select study years and remove duplicates
+    birth = birth[
+        birth["year"].between(2016, 2025)
+    ].drop_duplicates(["state", "year"])
 
-    # Exclude Malaysia national summary
-    school = school.loc[school["state"] != "Malaysia"]
+    income = income[
+        income["year"].between(2016, 2025)
+    ].drop_duplicates(["state", "year"])
 
-    school = school.dropna(
-        subset=["state", "year", "stage", "sex"]
-    ).drop_duplicates(
+    school = school[
+        school["year"].between(2016, 2025)
+    ].drop_duplicates(
         ["state", "year", "stage", "sex"]
     )
 
-    # Merge datasets
-    birth_income = birth.merge(
-        income,
+    # Merge births and income
+    bi = birth[
+        ["state", "year", "rate", "abs"]
+    ].merge(
+        income[
+            [
+                "state", "year",
+                "income_median", "income_mean"
+            ]
+        ],
         on=["state", "year"],
+        how="inner",
         validate="one_to_one"
     )
 
-    school_income = school.merge(
-        income,
+    # Merge school completion and income
+    si = school[
+        [
+            "state", "year", "stage",
+            "sex", "completion"
+        ]
+    ].merge(
+        income[
+            [
+                "state", "year",
+                "income_median", "income_mean"
+            ]
+        ],
         on=["state", "year"],
+        how="inner",
         validate="many_to_one"
     )
 
-    birth_school = birth.merge(
-        school,
+    # Merge births and school completion
+    bs = birth[
+        ["state", "year", "rate"]
+    ].merge(
+        school[
+            [
+                "state", "year", "stage",
+                "sex", "completion"
+            ]
+        ],
         on=["state", "year"],
+        how="inner",
         validate="one_to_many"
     )
 
-    return birth_income, school_income, birth_school
+    return bi, si, bs
 
 
 try:
     bi, si, bs = load_data()
 
-except Exception as error:
-    st.error(f"Could not load the CSV files: {error}")
+except Exception as exc:
+    st.error(
+        f"Unable to load datasets: {exc}"
+    )
     st.stop()
 
 
 # ==========================================
-# 3. INTERACTIVE DASHBOARD FILTERS
+# 3. INTERACTIVE SIDEBAR FILTERS
 # ==========================================
 
-st.sidebar.header("Dashboard Filters")
+st.sidebar.header("Analysis Filters")
 
-shared_years = sorted(
+valid_years = sorted(
     set(bi["year"]) & set(si["year"])
 )
 
+if not valid_years:
+    st.error(
+        "No overlapping income survey years were found."
+    )
+    st.stop()
+
 year = st.sidebar.selectbox(
-    "Household income survey year",
-    shared_years,
-    index=len(shared_years) - 1
+    "Income survey year",
+    valid_years,
+    index=len(valid_years) - 1
 )
 
 stages = {
@@ -152,17 +212,22 @@ stages = {
     "primary": "Primary"
 }
 
-stage = st.sidebar.selectbox(
-    "Education stage",
-    list(stages),
-    format_func=stages.get
-)
-
 sexes = {
     "both": "Both genders",
     "female": "Female",
     "male": "Male"
 }
+
+incomes = {
+    "income_median": "Median income",
+    "income_mean": "Mean income"
+}
+
+stage = st.sidebar.selectbox(
+    "School stage",
+    list(stages),
+    format_func=stages.get
+)
 
 sex = st.sidebar.selectbox(
     "Gender",
@@ -170,60 +235,62 @@ sex = st.sidebar.selectbox(
     format_func=sexes.get
 )
 
-income_labels = {
-    "income_median": "Median income",
-    "income_mean": "Mean income"
-}
-
 income_col = st.sidebar.selectbox(
-    "Monthly income measure",
-    list(income_labels),
-    format_func=income_labels.get
+    "Monthly household income",
+    list(incomes),
+    format_func=incomes.get
 )
 
 st.sidebar.caption(
-    "The selected survey year applies to Objectives 1 "
-    "and 2. Objective 3 shows 2016–2025."
+    "The year filter applies to Objectives 1 and 2. "
+    "Objective 3 shows every year from 2016 to 2025."
 )
 
 
 # ==========================================
-# 4. DASHBOARD HEADER
+# 4. DASHBOARD HEADER AND OBJECTIVES
 # ==========================================
 
 st.markdown("""
 <div style="
-background:#174737;
-color:white;
-padding:24px 28px;
-border-radius:14px;
-margin-bottom:18px;
+    background:#174737;
+    color:white;
+    padding:26px 28px;
+    border-radius:16px;
+    margin-bottom:16px;
 ">
     <div style="
-    font-size:13px;
-    color:#DDECE4;
-    font-weight:600;
+        font-size:12px;
+        letter-spacing:1.3px;
+        color:#DDECE4;
+        font-weight:700;
     ">
         JIE42403 · SCIENTIFIC VISUALISATION
     </div>
 
     <div style="
-    font-size:32px;
-    font-weight:750;
+        font-size:33px;
+        font-weight:750;
+        margin-top:6px;
     ">
         Malaysia Data Insights
     </div>
 
-    <div style="color:#E7F4EC">
-        Birth Rates · Household Income · School Completion
+    <div style="
+        font-size:15px;
+        color:#E4F2EC;
+    ">
+        Live Births · Household Income ·
+        School Completion
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 
-st.subheader("Research Objectives")
-
-with st.container(border=True):
+with st.expander(
+    "Research Objectives",
+    expanded=True
+):
 
     st.write(
         "**Objective 1:** To identify the relationship "
@@ -240,40 +307,37 @@ with st.container(border=True):
         "between annual live births and school completion rates."
     )
 
-st.caption(
-    "For comparisons between states, annual live births "
-    "are represented as births per 1,000 people."
-)
-
 
 # ==========================================
 # 5. HELPER FUNCTIONS
 # ==========================================
 
-def correlation(df, x, y):
+def pearson(data, x, y):
 
-    d = df[[x, y]].dropna()
+    valid = data[[x, y]].dropna()
 
     if (
-        len(d) < 3
-        or d[x].nunique() < 2
-        or d[y].nunique() < 2
+        len(valid) < 3
+        or valid[x].nunique() < 2
+        or valid[y].nunique() < 2
     ):
         return float("nan")
 
-    return float(d[x].corr(d[y]))
+    return float(valid[x].corr(valid[y]))
 
 
-def describe(r):
+def relationship(r):
 
     if pd.isna(r):
         return "undefined"
 
-    if abs(r) < 0.1:
+    magnitude = abs(r)
+
+    if magnitude < 0.10:
         strength = "negligible"
-    elif abs(r) < 0.3:
+    elif magnitude < 0.30:
         strength = "weak"
-    elif abs(r) < 0.7:
+    elif magnitude < 0.70:
         strength = "moderate"
     else:
         strength = "strong"
@@ -283,28 +347,65 @@ def describe(r):
     elif r < 0:
         direction = "negative"
     else:
-        direction = "neither positive nor negative"
+        direction = "zero"
 
     return f"{strength} {direction}"
 
 
-def cards(items):
+def show_cards(metrics):
 
-    columns = st.columns(len(items))
+    columns = st.columns(len(metrics))
 
-    for col, (label, value) in zip(columns, items):
-        with col:
-            st.metric(label, value, border=True)
+    for column, (label, value) in zip(
+        columns, metrics
+    ):
+
+        with column:
+            st.metric(
+                label,
+                value,
+                border=True
+            )
+
+
+def show_preview(data, columns):
+
+    with st.expander(
+        "Data Preview (Matched Observations)"
+    ):
+
+        st.dataframe(
+            data[columns].sort_values("state"),
+            hide_index=True,
+            width="stretch"
+        )
+
+        st.caption(
+            "These data have been cleaned and matched "
+            "by state and year."
+        )
 
 
 # ==========================================
-# 6. OBJECTIVE 1 - SEABORN BAR CHART
+# 6. CREATE THREE OBJECTIVE TABS
 # ==========================================
 
-def objective1():
+tab1, tab2, tab3 = st.tabs([
+    "01 · Births & Income",
+    "02 · Education & Income",
+    "03 · Births & Education"
+])
+
+
+# ==========================================
+# OBJECTIVE 1 - SEABORN BAR CHART
+# ==========================================
+
+with tab1:
 
     st.header(
-        "Objective 1 — Annual Live Births and Household Income"
+        "Objective 1 — Annual Live Births "
+        "and Household Income"
     )
 
     st.write(
@@ -312,108 +413,163 @@ def objective1():
         "between annual live births and household income."
     )
 
-    a = bi.loc[
-        bi["year"] == year,
-        ["state", "year", "rate", "abs", income_col]
-    ].dropna().copy()
+    data1 = bi[
+        bi["year"] == year
+    ].dropna(
+        subset=[income_col, "rate"]
+    ).copy()
 
-    if len(a) < 4:
-        st.warning("Not enough matching state records.")
-        return
+    if len(data1) < 4:
 
-    r = correlation(a, income_col, "rate")
+        st.warning(
+            "Not enough matching observations for this year."
+        )
 
-    # Summary boxes
-    cards([
-        ("Survey year", str(year)),
-        ("States compared", str(a.state.nunique())),
-        ("Pearson r", f"{r:+.3f}")
-    ])
+    else:
 
-    # Divide states into four relative income groups
-    a["Income group"] = pd.qcut(
-        a[income_col].rank(method="first"),
-        4,
-        labels=[
-            "Lowest",
-            "Lower-middle",
-            "Upper-middle",
-            "Highest"
+        r1 = pearson(
+            data1, income_col, "rate"
+        )
+
+        # IMPROVED SUMMARY BOXES
+        show_cards([
+            (
+                "Average Birth Rate",
+                f"{data1['rate'].mean():.2f} per 1,000"
+            ),
+            (
+                "Pearson Correlation (r)",
+                f"{r1:+.3f}"
+            ),
+            (
+                "States Compared",
+                f"{data1['state'].nunique()}"
+            )
+        ])
+
+        st.caption(
+            f"{year} · Relationship: {relationship(r1)} "
+            "· Income categories are relative quartiles."
+        )
+
+        # Prepare four income groups
+        data1["Income group"] = pd.qcut(
+            data1[income_col].rank(
+                method="first"
+            ),
+            q=4,
+            labels=[
+                "Lowest",
+                "Lower-middle",
+                "Upper-middle",
+                "Highest"
+            ]
+        )
+
+        grouped = data1.groupby(
+            "Income group",
+            observed=True
+        )["rate"].mean().reset_index()
+
+        # ONE VISUALIZATION
+        st.subheader(
+            "Average Birth Rate by "
+            "Household Income Group"
+        )
+
+        fig1, ax1 = plt.subplots(
+            figsize=(9, 4.5)
+        )
+
+        sns.barplot(
+            data=grouped,
+            x="Income group",
+            y="rate",
+            color=GREEN,
+            ax=ax1
+        )
+
+        # Add values above bars
+        for bars in ax1.containers:
+
+            ax1.bar_label(
+                bars,
+                fmt="%.2f",
+                padding=4,
+                fontsize=10
+            )
+
+        ax1.set_xlabel(
+            "Relative Household Income Group"
+        )
+
+        ax1.set_ylabel(
+            "Live Births per 1,000 People"
+        )
+
+        # Start vertical axis at zero
+        ax1.set_ylim(
+            0,
+            grouped["rate"].max() * 1.20
+        )
+
+        sns.despine(ax=ax1)
+        fig1.tight_layout()
+
+        st.pyplot(
+            fig1,
+            width="stretch"
+        )
+
+        plt.close(fig1)
+
+        # Identify highest and lowest groups
+        highest = grouped.loc[
+            grouped["rate"].idxmax()
         ]
-    )
 
-    grouped = a.groupby(
-        "Income group",
-        observed=True
-    )["rate"].mean().reset_index()
+        lowest = grouped.loc[
+            grouped["rate"].idxmin()
+        ]
 
-    # ONE VISUALIZATION
-    st.subheader(
-        "Average Birth Rate by Household Income Group"
-    )
-
-    fig, ax = plt.subplots(figsize=(9, 4.7))
-
-    sns.barplot(
-        data=grouped,
-        x="Income group",
-        y="rate",
-        color=GREEN,
-        ax=ax
-    )
-
-    for container in ax.containers:
-        ax.bar_label(
-            container,
-            fmt="%.2f",
-            padding=4
+        # INTERPRETATION
+        st.subheader(
+            "Interpretation and Discussion"
         )
 
-    ax.set_xlabel("Relative Household Income Group")
-    ax.set_ylabel("Live Births per 1,000 People")
+        st.write(
+            f"In {year}, the **{highest['Income group']}** "
+            "income group recorded the highest average "
+            f"birth rate of **{highest['rate']:.2f} "
+            "births per 1,000 people**, while the "
+            f"**{lowest['Income group']}** group "
+            "recorded the lowest average birth rate "
+            f"of **{lowest['rate']:.2f}**. "
+            "The Pearson correlation coefficient was "
+            f"**{r1:+.3f}**, indicating a "
+            f"**{relationship(r1)}** linear relationship. "
+            "The results show an association but do "
+            "not establish causation."
+        )
 
-    ax.set_ylim(
-        0,
-        grouped["rate"].max() * 1.2
-    )
-
-    sns.despine(ax=ax)
-    fig.tight_layout()
-
-    st.pyplot(fig, width="stretch")
-    plt.close(fig)
-
-    # Interpretation
-    st.subheader("Interpretation and Discussion")
-
-    st.write(
-        f"In {year}, the correlation between household "
-        f"income and birth rate was **{r:+.3f}**, "
-        f"indicating a **{describe(r)}** state-level "
-        "relationship. The four bars show average birth "
-        "rates for equally sized relative income groups, "
-        "not official income classifications. "
-        "This association does not establish causation."
-    )
-
-    # Data preview
-    with st.expander("Data Preview"):
-
-        st.dataframe(
-            a[["state", income_col, "rate", "abs"]],
-            hide_index=True,
-            use_container_width=True
+        show_preview(
+            data1,
+            [
+                "state", "year",
+                income_col, "rate", "abs"
+            ]
         )
 
 
 # ==========================================
-# 7. OBJECTIVE 2 - SEABORN SCATTER PLOT
+# OBJECTIVE 2 - SEABORN SCATTER PLOT
 # ==========================================
 
-def objective2():
+with tab2:
 
     st.header(
-        "Objective 2 — School Completion and Household Income"
+        "Objective 2 — School Completion "
+        "Rates and Household Income"
     )
 
     st.write(
@@ -421,103 +577,143 @@ def objective2():
         "between school completion rates and household income."
     )
 
-    b = si.loc[
+    data2 = si[
         (si["year"] == year)
         & (si["stage"] == stage)
-        & (si["sex"] == sex),
-        ["state", "year", "completion", income_col]
-    ].dropna().copy()
+        & (si["sex"] == sex)
+    ].copy()
 
-    if len(b) < 3:
-        st.warning("Not enough matching observations.")
-        return
-
-    r = correlation(
-        b,
-        income_col,
-        "completion"
+    data2 = data2.dropna(
+        subset=[income_col, "completion"]
     )
 
-    # Summary boxes
-    cards([
-        ("Survey year", str(year)),
-        (
-            "Average completion",
-            f"{b.completion.mean():.1f}%"
-        ),
-        ("Pearson r", f"{r:+.3f}")
-    ])
+    if (
+        len(data2) < 3
+        or data2[income_col].nunique() < 2
+    ):
 
-    # ONE VISUALIZATION
-    st.subheader(
-        "Household Income vs School Completion Rate"
-    )
+        st.warning(
+            "Not enough valid observations "
+            "for the selected filters."
+        )
 
-    fig, ax = plt.subplots(figsize=(9, 4.8))
+    else:
 
-    sns.regplot(
-        data=b,
-        x=income_col,
-        y="completion",
-        ci=None,
-        scatter_kws={
-            "color": GREEN,
-            "s": 85,
-            "alpha": 0.85
-        },
-        line_kws={
-            "color": ORANGE,
-            "linewidth": 2.5
-        },
-        ax=ax
-    )
+        r2 = pearson(
+            data2,
+            income_col,
+            "completion"
+        )
 
-    ax.set_xlabel("Monthly Household Income (RM)")
-    ax.set_ylabel("School Completion Rate (%)")
+        # IMPROVED SUMMARY BOXES
+        show_cards([
+            (
+                "Average Completion Rate",
+                f"{data2['completion'].mean():.2f}%"
+            ),
+            (
+                "Pearson Correlation (r)",
+                f"{r2:+.3f}"
+            ),
+            (
+                "States Compared",
+                f"{data2['state'].nunique()}"
+            )
+        ])
 
-    ax.xaxis.set_major_formatter(
-        StrMethodFormatter("{x:,.0f}")
-    )
+        st.caption(
+            f"{year} · {stages[stage]} · {sexes[sex]} "
+            f"· Relationship: {relationship(r2)}"
+        )
 
-    sns.despine(ax=ax)
-    fig.tight_layout()
+        # ONE VISUALIZATION
+        st.subheader(
+            "Household Income versus "
+            "School Completion Rate"
+        )
 
-    st.pyplot(fig, width="stretch")
-    plt.close(fig)
+        fig2, ax2 = plt.subplots(
+            figsize=(9, 4.7)
+        )
 
-    # Interpretation
-    st.subheader("Interpretation and Discussion")
+        sns.regplot(
+            data=data2,
+            x=income_col,
+            y="completion",
+            ci=None,
+            scatter_kws={
+                "color": GREEN,
+                "s": 85,
+                "alpha": 0.85,
+                "edgecolor": "white"
+            },
+            line_kws={
+                "color": ORANGE,
+                "linewidth": 2.5
+            },
+            ax=ax2
+        )
 
-    st.write(
-        f"For **{stages[stage].lower()}** and "
-        f"**{sexes[sex].lower()}** in {year}, the "
-        f"correlation was **{r:+.3f}**, a "
-        f"**{describe(r)}** relationship. "
-        "Each dot represents one state or federal "
-        "territory. The orange regression line indicates "
-        "the overall linear direction, but does not "
-        "prove that income causes completion rates "
-        "to change."
-    )
+        ax2.set_xlabel(
+            "Monthly Household Income (RM)"
+        )
 
-    # Data preview
-    with st.expander("Data Preview"):
+        ax2.set_ylabel(
+            "School Completion Rate (%)"
+        )
 
-        st.dataframe(
-            b,
-            hide_index=True,
-            use_container_width=True
+        ax2.xaxis.set_major_formatter(
+            StrMethodFormatter("{x:,.0f}")
+        )
+
+        sns.despine(ax=ax2)
+        fig2.tight_layout()
+
+        st.pyplot(
+            fig2,
+            width="stretch"
+        )
+
+        plt.close(fig2)
+
+        # INTERPRETATION
+        st.subheader(
+            "Interpretation and Discussion"
+        )
+
+        st.write(
+            f"For **{stages[stage].lower()}**, "
+            f"**{sexes[sex].lower()}**, in {year}, "
+            "the Pearson correlation coefficient "
+            f"was **{r2:+.3f}**, indicating a "
+            f"**{relationship(r2)}** linear relationship "
+            "between household income and school "
+            "completion rates. Each point represents "
+            "one Malaysian state or federal territory. "
+            "The orange regression line illustrates "
+            "the overall direction of the relationship. "
+            "Other socioeconomic and educational factors "
+            "may also influence school completion outcomes."
+        )
+
+        show_preview(
+            data2,
+            [
+                "state", "year",
+                income_col, "completion"
+            ]
         )
 
 
 # ==========================================
-# 8. OBJECTIVE 3 - BOKEH LINE CHART
+# OBJECTIVE 3 - BOKEH INTERACTIVE LINE CHART
 # ==========================================
 
-def objective3():
+with tab3:
 
     st.header(
-        "Objective 3 — Annual Live Births and School Completion"
+        "Objective 3 — Annual Live Births "
+        "and School Completion Rates"
     )
 
     st.write(
@@ -525,217 +721,264 @@ def objective3():
         "between annual live births and school completion rates."
     )
 
-    c = bs.loc[
+    data3 = bs[
         (bs["stage"] == stage)
         & (bs["sex"] == sex)
-    ].copy()
+    ].dropna(
+        subset=["rate", "completion"]
+    ).copy()
 
     # Calculate yearly Pearson correlations
     rows = []
 
-    for yr, group in c.groupby("year"):
+    for yr, group in data3.groupby("year"):
 
-        rows.append({
-            "Year": int(yr),
-            "Correlation": correlation(
-                group,
-                "rate",
-                "completion"
-            ),
-            "States": group["state"].nunique()
-        })
+        r = pearson(
+            group,
+            "rate",
+            "completion"
+        )
+
+        if pd.notna(r):
+
+            rows.append({
+                "Year": int(yr),
+                "Correlation": r,
+                "States": group["state"].nunique()
+            })
 
     trend = pd.DataFrame(rows)
 
-    trend = trend.sort_values("Year").dropna(
-        subset=["Correlation"]
-    )
-
     if trend.empty:
-        st.warning("No valid yearly correlations found.")
-        return
 
-    latest = trend.iloc[-1]
-
-    # Summary boxes
-    cards([
-        ("Years analysed", str(len(trend))),
-        ("States covered", str(c.state.nunique())),
-        (
-            f"Correlation in {int(latest.Year)}",
-            f"{latest.Correlation:+.3f}"
+        st.warning(
+            "No valid yearly correlations "
+            "for this selection."
         )
-    ])
 
-    # ONE VISUALIZATION
-    st.subheader(
-        "Yearly Correlation: Birth Rates vs School Completion"
-    )
+    else:
 
-    source = ColumnDataSource(trend)
+        trend = trend.sort_values(
+            "Year"
+        ).reset_index(drop=True)
 
-    p = figure(
-        x_axis_label="Year",
-        y_axis_label="Pearson Correlation (r)",
-        height=430,
-        sizing_mode="stretch_width",
-        x_range=(2015.5, 2025.5),
-        y_range=(-1, 1),
-        tools="pan,wheel_zoom,box_zoom,reset,save"
-    )
+        latest = trend.iloc[-1]
 
-    # Draw line
-    p.line(
-        "Year",
-        "Correlation",
-        source=source,
-        line_width=3,
-        color=DARK
-    )
+        # Find strongest positive correlation
+        positive = trend[
+            trend["Correlation"] > 0
+        ]
 
-    # Add points
-    points = p.scatter(
-        "Year",
-        "Correlation",
-        source=source,
-        size=11,
-        color=GREEN
-    )
+        if positive.empty:
 
-    # Hover tooltips
-    p.add_tools(
-        HoverTool(
-            renderers=[points],
-            tooltips=[
-                ("Year", "@Year"),
-                (
-                    "Pearson r",
-                    "@Correlation{0.000}"
-                ),
-                ("States compared", "@States")
+            best_label = "Strongest Positive r"
+            best_value = "None"
+
+        else:
+
+            best = positive.loc[
+                positive["Correlation"].idxmax()
             ]
+
+            best_label = (
+                "Strongest Positive r "
+                f"({int(best['Year'])})"
+            )
+
+            best_value = (
+                f"{best['Correlation']:+.3f}"
+            )
+
+        # IMPROVED SUMMARY BOXES
+        show_cards([
+            (
+                "Years Analysed",
+                f"{len(trend)}"
+            ),
+            (
+                best_label,
+                best_value
+            ),
+            (
+                f"Latest Pearson r ({int(latest['Year'])})",
+                f"{latest['Correlation']:+.3f}"
+            )
+        ])
+
+        st.caption(
+            f"{stages[stage]} · {sexes[sex]} "
+            "· Latest relationship: "
+            f"{relationship(latest['Correlation'])}"
         )
-    )
 
-    # Reference line at zero
-    p.add_layout(
-        Span(
-            location=0,
-            dimension="width",
-            line_color="gray",
-            line_dash="dashed"
+        # ONE VISUALIZATION
+        st.subheader(
+            "Yearly Birth Rate and "
+            "School Completion Relationship"
         )
-    )
 
-    p.xaxis.ticker = list(range(2016, 2026))
-    p.ygrid.grid_line_alpha = 0.2
-    p.toolbar.logo = None
+        source = ColumnDataSource(trend)
 
-    # Display interactive Bokeh chart
-    st.iframe(
-        file_html(
-            p,
-            CDN,
-            "Births and School Completion"
-        ),
-        height=490,
-        alt="Interactive line chart of yearly correlations"
-    )
-
-    # Identify highest and lowest correlations
-    high = trend.loc[
-        trend["Correlation"].idxmax()
-    ]
-
-    low = trend.loc[
-        trend["Correlation"].idxmin()
-    ]
-
-    # Interpretation
-    st.subheader("Interpretation and Discussion")
-
-    st.write(
-        "Across 2016–2025, correlations between birth "
-        f"rates and **{stages[stage].lower()}** completion "
-        "changed over time. The highest correlation was "
-        f"**{high.Correlation:+.3f}** in **{int(high.Year)}**, "
-        "and the lowest was "
-        f"**{low.Correlation:+.3f}** in **{int(low.Year)}**. "
-        "The latest correlation was "
-        f"**{latest.Correlation:+.3f}**, indicating a "
-        f"**{describe(latest.Correlation)}** relationship. "
-        "These yearly state-level associations do not "
-        "demonstrate causation."
-    )
-
-    # Data preview
-    with st.expander("Data Preview"):
-
-        st.dataframe(
-            trend,
-            hide_index=True,
-            use_container_width=True
+        plot = figure(
+            x_axis_label="Year",
+            y_axis_label=(
+                "Pearson Correlation Coefficient (r)"
+            ),
+            height=415,
+            sizing_mode="stretch_width",
+            x_range=(2015.5, 2025.5),
+            y_range=(-1, 1),
+            tools=(
+                "pan,wheel_zoom,"
+                "box_zoom,reset,save"
+            )
         )
+
+        # Draw line
+        plot.line(
+            "Year",
+            "Correlation",
+            source=source,
+            line_width=3,
+            color=DARK
+        )
+
+        # Draw interactive markers
+        points = plot.scatter(
+            "Year",
+            "Correlation",
+            source=source,
+            size=11,
+            color=GREEN
+        )
+
+        # Add hover tooltips
+        plot.add_tools(
+            HoverTool(
+                renderers=[points],
+                tooltips=[
+                    ("Year", "@Year"),
+                    (
+                        "Pearson r",
+                        "@Correlation{0.000}"
+                    ),
+                    ("States", "@States")
+                ]
+            )
+        )
+
+        # Reference line at zero
+        plot.add_layout(
+            Span(
+                location=0,
+                dimension="width",
+                line_color="#888888",
+                line_dash="dashed"
+            )
+        )
+
+        plot.xaxis.ticker = list(
+            range(2016, 2026)
+        )
+
+        plot.ygrid.grid_line_alpha = 0.20
+        plot.toolbar.logo = None
+
+        # Display interactive Bokeh chart
+        st.iframe(
+            file_html(
+                plot,
+                CDN,
+                "Births and School Completion"
+            ),
+            height=475,
+            alt=(
+                "Interactive Bokeh line chart "
+                "showing yearly Pearson correlations"
+            )
+        )
+
+        # INTERPRETATION
+        st.subheader(
+            "Interpretation and Discussion"
+        )
+
+        st.write(
+            "The relationship between birth rates "
+            f"and **{stages[stage].lower()} school "
+            "completion** changed from "
+            f"{int(trend['Year'].min())} to "
+            f"{int(trend['Year'].max())}. "
+            f"In {int(latest['Year'])}, the Pearson "
+            "correlation coefficient was "
+            f"**{latest['Correlation']:+.3f}**, "
+            "indicating a "
+            f"**{relationship(latest['Correlation'])}** "
+            "linear relationship. Positive values "
+            "indicate positive associations, while "
+            "negative values indicate negative "
+            "associations. The findings represent "
+            "state-level statistical relationships "
+            "and do not demonstrate causation."
+        )
+
+        # DATA PREVIEW
+        with st.expander(
+            "Yearly Correlation Data"
+        ):
+
+            st.dataframe(
+                trend.round(3),
+                hide_index=True,
+                width="stretch"
+            )
 
 
 # ==========================================
-# 9. OBJECTIVE PAGE NAVIGATION
-# ==========================================
-
-navigation = st.navigation([
-
-    st.Page(
-        objective1,
-        title="01 · Births & Income",
-        icon="📊",
-        default=True
-    ),
-
-    st.Page(
-        objective2,
-        title="02 · Education & Income",
-        icon="🎓"
-    ),
-
-    st.Page(
-        objective3,
-        title="03 · Births & Education",
-        icon="📈"
-    )
-
-], position="sidebar")
-
-navigation.run()
-
-
-# ==========================================
-# 10. DATASET SOURCES AND METHODOLOGY
+# 7. DATASET SOURCES AND METHODOLOGY
 # ==========================================
 
 st.divider()
 
-with st.expander("Dataset Sources and Methodology"):
+with st.expander(
+    "Dataset Sources, Preparation and Limitations"
+):
 
     st.write(
-        "**Sources:** OpenDOSM state-level live births, "
-        "household income, and school completion datasets."
+        "**Sources:** OpenDOSM state-level annual "
+        "live births, household income and school "
+        "completion datasets."
     )
 
     st.write(
-        "**Data preparation:** Dates were converted to "
-        "years, numerical columns checked, duplicate "
-        "observations removed, nationwide school totals "
-        "excluded, and datasets merged by state and year."
+        "**Data preparation:** Dates were converted "
+        "to years, state names were standardized, "
+        "numerical fields were converted, duplicate "
+        "observations were removed, national totals "
+        "were excluded, and the datasets were merged "
+        "using matching states and years."
     )
 
     st.write(
-        "**Limitations:** Income surveys cover selected "
-        "years only. School completion rates may exceed "
-        "100%. The findings represent state-level "
-        "associations rather than causal effects."
+        "**Missing data:** Missing numerical values "
+        "were not replaced with zero. Only valid "
+        "observations were included in each analysis."
+    )
+
+    st.write(
+        "**Limitations:** Household income data are "
+        "available for selected survey years only. "
+        "Income is reported in nominal RM. "
+        "School completion rates may exceed 100% "
+        "under the official indicator definition. "
+        "The results describe statistical associations "
+        "rather than causal effects."
     )
 
     st.markdown(
+        "[Live Births]"
+        "(https://open.dosm.gov.my/data-catalogue/births_annual_state)"
+        " · "
         "[School Completion]"
         "(https://open.dosm.gov.my/data-catalogue/completion_school_state)"
         " · "
@@ -744,6 +987,6 @@ with st.expander("Dataset Sources and Methodology"):
     )
 
 st.caption(
-    "JIE42403 Scientific Visualisation | "
-    "OpenDOSM State-Level Statistics"
+    "JIE42403 Scientific Visualisation · "
+    "OpenDOSM · One Visualization per Objective"
 )
